@@ -40,14 +40,21 @@ class LLMService:
         self.client = AsyncOpenAI(api_key=api_key, timeout=timeout)
 
     async def generate_response(
-        self, strategy: PromptStrategy, context: Dict[str, str], model: str | None = None
+        self,
+        strategy: PromptStrategy,
+        context: Dict[str, str],
+        model: str | None = None,
+        json_mode: bool = False,
     ) -> str:
         model = model or settings.LLM_MODEL
         template = PROMPT_TEMPLATES.get(strategy)
         if not template:
             raise LLMServiceError("Invalid prompt strategy selected.")
 
-        sanitized_context = {k: sanitize_input(v) if isinstance(v, str) else v for k, v in context.items()}
+        sanitized_context = {
+            k: sanitize_input(v) if isinstance(v, str) else v
+            for k, v in context.items()
+        }
 
         try:
             system_prompt = template["system"]
@@ -62,10 +69,10 @@ class LLMService:
                 "model": model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ]
+                    {"role": "user", "content": user_prompt},
+                ],
             }
-            if strategy == PromptStrategy.EXTRACT_ACTIONS_JSON:
+            if json_mode:
                 response_kwargs["response_format"] = {"type": "json_object"}
 
             response = await self.client.chat.completions.create(**response_kwargs)

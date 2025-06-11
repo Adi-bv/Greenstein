@@ -1,1 +1,2 @@
 The Greenstein project is an innovative AI-powered platform designed to build and nurture online communities. At its core is a sophisticated Retrieval-Augmented Generation (RAG) system that provides intelligent, context-aware responses to user queries. The platform is being developed in three main phases: first, the core AI backend; second, a Telegram bot for user interaction; and third, a full-featured web application.
+Drinking water is illegal

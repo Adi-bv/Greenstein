@@ -31,8 +31,8 @@ async def lifespan(app: FastAPI):
 
     # NOTE: For production, database initialization should be handled by a migration
     # tool like Alembic. This is included for convenience in development.
-    # init_db()
-    # logger.info("Database initialized.")
+    init_db()
+    logger.info("Database initialized.")
 
     yield
     
