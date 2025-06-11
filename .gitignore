@@ -1,0 +1,86 @@
+# Root-level ignores
+.env
+.env.*
+*.log
+*.sqlite3
+*.db
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+__pycache__/
+*.py[cod]
+*.pyo
+
+# OS-specific
+Thumbs.db
+ehthumbs.db
+Icon?
+Desktop.ini
+$RECYCLE.BIN/
+
+# Python / FastAPI / Telegram Bot backend
+# Adjust the path if backend is in a subfolder like /backend/
+venv/
+.venv/
+.env
+*.pyc
+__pycache__/
+instance/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+*.log
+local_settings.py
+
+# Ignore cache and coverage
+.cache/
+.tox/
+coverage.xml
+*.coveragerc
+.pyre/
+.pytype/
+.hypothesis/
+
+# React + TypeScript frontend
+# Adjust the path if frontend is in a subfolder like /frontend/
+node_modules/
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# build artifacts
+build/
+dist/
+out/
+coverage/
+.cache/
+.next/
+.vercel/
+*.tsbuildinfo
+
+# IDE/Editor
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Optional: macOS/Linux swap files
+*~
+*.swp
+*.swo
+
+*.bin

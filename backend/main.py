@@ -1,25 +1,16 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
+from .app.api import query, filter
 
-app = FastAPI()
+app = FastAPI(
+    title="Greenstein AI Backend",
+    description="The core AI services for the Greenstein community platform.",
+    version="0.1.0"
+)
 
-class QueryRequest(BaseModel):
-    message: str
+# Include routers
+app.include_router(query.router, prefix="/query", tags=["Query"])
+app.include_router(filter.router, prefix="/filter", tags=["Filter"])
 
-@app.post("/query")
-async def handle_query(data: QueryRequest):
-    # Placeholder logic
-    user_message = data.message
-    return {"response": f"Received query: {user_message}"}
-
-@app.post("/filter")
-async def filter_messages(data: QueryRequest):
-    # Placeholder logic
-    message = data.message
-    return {"filtered": f"Important part of: {message}"}
-
-@app.post("/summary")
-async def summarize_messages(data: QueryRequest):
-    # Placeholder logic
-    message = data.message
-    return {"summarized": f"Summarized content is: {message}"}
+@app.get("/", tags=["Root"])
+async def read_root():
+    return {"message": "Welcome to the Greenstein AI Backend"}
