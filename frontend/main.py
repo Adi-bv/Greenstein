@@ -1,8 +1,13 @@
+import httpx
+import re 
+
 from typing import Final
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 TOKEN: Final = '7905624830:AAEGDOfk0ppuW8_Rsn0NVMjbVXt8IJNNsaQ'
 BOT_USERNAME: Final = 'greenstein_bot'
+
+BACKEND_URL = "http://127.0.0.1:8000"
 
 #Commands
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -11,34 +16,46 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
 
 # Responses
-
-def handel_response(text: str) -> str:
+async def handel_response(text: str) -> str:
   processed: str = text.lower()
-  if 'hello' in processed or 'hi' in processed:
-    return 'Hello! How can I help you?'
-  return 'I do not understand what you wrote.....'
+  if 'filter' in processed:
+    async with httpx.AsyncClient() as client:
+      res = await client.post(f"{BACKEND_URL}/filter", json={"message": text})
+      return res.json().get("filtered", "No filtered result found.")
+        
+  elif 'query' in processed or 'what' in processed or 'when' in processed or 'how' in processed:
+    async with httpx.AsyncClient() as client:
+            res = await client.post(f"{BACKEND_URL}/query", json={"message": text})
+            return res.json().get("response", "No query response found.")
+    
+  elif 'hello' in processed or 'hi' in processed:
+        return "Hello! How can I help you?"
+
+  return "I do not understand what you wrote..."
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-  message_type: str= update.message.chat.type
-  text: str = update.message.text
-  
-  print(f'User({update.message.chat.id}) in {message_type}: "{text}"')
-  print(f'Message type: {message_type}, Text: "{text}", Contains bot name: {"@"+BOT_USERNAME.lower() in text.lower()}')
+    message_type: str = update.message.chat.type
+    text: str = update.message.text
+    text_lower = text.lower()
 
-  
-  if message_type=='group' or message_type=='supergroup':
-    text = update.message.text.lower()
-    if f'@{BOT_USERNAME.lower()}' in text:
-      new_text: str = text.replace(BOT_USERNAME, '').strip()
-      response: str = handel_response(new_text)
+    print(f'User({update.message.chat.id}) in {message_type}: "{text}"')
+    print(f'Message type: {message_type}, Text: "{text}", Contains bot name: {"@"+BOT_USERNAME.lower() in text_lower}')
+
+    if message_type in ['group', 'supergroup']:
+        if re.search(f"@{BOT_USERNAME}", text, re.IGNORECASE):
+          clean_text = re.sub(f"@{BOT_USERNAME}", "", text, flags=re.IGNORECASE).strip()
+        else:
+          return
     else:
-      return
-  else:
-    response: str = handel_response(text)
-    
-  print('Bot:',response)
-  await update.message.reply_text(response)
+        clean_text = text_lower
+
+    # Call appropriate backend endpoint
+    # Use the central response logic
+    result = await handel_response(clean_text)
+
+
+    await update.message.reply_text(result)
   
   
 async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -52,12 +69,10 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler('start', start_command))
     # Only handle private messages or group messages mentioning the bot
     app.add_handler(MessageHandler(
-        filters.TEXT & (
-            filters.ChatType.PRIVATE |
-            (filters.ChatType.GROUP & filters.Update.MESSAGE & filters.Regex(f'@{BOT_USERNAME}'))
-        ),
-        handle_message
-    ))
+    filters.TEXT & (filters.ChatType.PRIVATE | filters.ChatType.GROUP | filters.ChatType.SUPERGROUP),
+    handle_message
+))
+
     # Errors
     app.add_error_handler(error)
     # Polls the bot
