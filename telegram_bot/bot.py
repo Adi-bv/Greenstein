@@ -25,35 +25,27 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Message Processing ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message_type: str = update.message.chat.type
+    """Handles all non-command text messages by forwarding them to the backend."""
     text: str = update.message.text
     user_id: int = update.message.from_user.id
 
-    print(f'User ({user_id}) in {message_type}: "{text}"')
+    print(f'User ({user_id}) sent: "{text}"')
 
-    processed_text: str = text.lower()
-    response_data = {}
+    # Send the message to the backend and get the AI's response
+    response_data = await client.get_chat_response(text, user_id)
 
-    if 'filter' in processed_text:
-        response_data = await client.post_to_backend("filter", text, user_id)
-        reply = response_data.get("filtered", "No filtered result found.")
-    elif 'query' in processed_text or 'what' in processed_text or 'when' in processed_text or 'how' in processed_text:
-        response_data = await client.post_to_backend("query", text, user_id)
-        reply = response_data.get("response", "No query response found.")
-    elif 'hello' in processed_text or 'hi' in processed_text:
-        reply = "Hello! How can I help you?"
-    else:
-        reply = "I do not understand what you wrote..."
+    # Extract the reply or the error message
+    reply = response_data.get("response") or response_data.get("error")
 
-    if response_data.get("error"):
-        reply = response_data["error"]
+    if not reply:
+        reply = "I seem to have lost my train of thought. Could you try that again?"
 
-    print(f'Bot: "{reply}"')
+    print(f'Bot responding: "{reply}"')
     await update.message.reply_text(reply)
 
 # --- Main Application Setup ---
 if __name__ == '__main__':
-    clear_webhook()
+    # clear_webhook()
 
     print("Starting bot...")
     app = Application.builder().token(TOKEN).build()

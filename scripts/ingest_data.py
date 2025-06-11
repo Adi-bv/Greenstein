@@ -1,93 +1,91 @@
-import os
-import sys
+import logging
 import chromadb
 from pathlib import Path
-
-# Add project root to path to allow importing from backend
-project_root = Path(__file__).parent.parent
-sys.path.append(str(project_root))
-
-from backend.app.db.session import SessionLocal, init_db
-from backend.app.db.models import DocumentMetadata
 from sentence_transformers import SentenceTransformer
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+# Now that the project is an installable package, we can use direct imports
+from app.core.config import settings
+from app.db.session import SessionLocal, init_db
+from app.db.models import DocumentMetadata
+
+# --- Setup Logging ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # --- Constants ---
-DATA_PATH = project_root / "data"
-CHROMA_PERSIST_DIR = project_root / "chroma_db"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-COLLECTION_NAME = "community_docs"
+# Use a more robust path for the data directory, assuming it's in the project root
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_PATH = PROJECT_ROOT / "data"
 
 def ingest_data():
-    """Reads documents, generates embeddings, and stores them."""
-    print("Starting data ingestion...")
+    """
+    Reads documents from the data directory, chunks them using an advanced splitter,
+    generates embeddings, and upserts them into ChromaDB. This process is idempotent.
+    """
+    logger.info("Starting data ingestion...")
 
-    # --- Initialize clients ---
+    # --- Initialize clients and services ---
     db = SessionLocal()
-    model = SentenceTransformer(EMBEDDING_MODEL)
-    chroma_client = chromadb.PersistentClient(path=str(CHROMA_PERSIST_DIR))
-    collection = chroma_client.get_or_create_collection(name=COLLECTION_NAME)
+    model = SentenceTransformer(settings.EMBEDDING_MODEL)
+    chroma_client = chromadb.PersistentClient(path=settings.CHROMA_PERSIST_DIR)
+    collection = chroma_client.get_or_create_collection(name=settings.COLLECTION_NAME)
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+        length_function=len
+    )
 
     # --- Ensure DB tables exist ---
     init_db()
-    print("Database initialized.")
+    logger.info("Database initialized.")
 
     # --- Process files ---
     doc_files = list(DATA_PATH.glob("**/*"))
-    print(f"Found {len(doc_files)} files to process in {DATA_PATH}.")
+    logger.info(f"Found {len(doc_files)} files to process in {DATA_PATH}.")
 
-    for doc_file in doc_files:
-        if doc_file.is_file() and doc_file.suffix in ['.md', '.txt']:
-            print(f"--- Processing {doc_file.name} ---")
+    try:
+        for doc_file in doc_files:
+            if doc_file.is_file() and doc_file.suffix in ['.md', '.txt']:
+                logger.info(f"--- Processing {doc_file.name} ---")
 
-            # --- 1. Store metadata in SQLite (if it doesn't exist) ---
-            existing_doc = db.query(DocumentMetadata).filter(DocumentMetadata.file_name == doc_file.name).first()
-            if existing_doc:
-                print(f"'{doc_file.name}' already in metadata DB. Skipping metadata entry.")
-            else:
-                new_doc_meta = DocumentMetadata(source="local", file_name=doc_file.name)
-                db.add(new_doc_meta)
-                db.commit()
-                print(f"Added '{doc_file.name}' to metadata database.")
+                # --- 1. Store metadata in SQLite (if it doesn't exist) ---
+                # This part remains the same, as it's a check against the relational DB
+                existing_doc = db.query(DocumentMetadata).filter(DocumentMetadata.file_name == doc_file.name).first()
+                if not existing_doc:
+                    new_doc_meta = DocumentMetadata(source="local", file_name=doc_file.name)
+                    db.add(new_doc_meta)
+                    db.commit()
+                    logger.info(f"Added '{doc_file.name}' to metadata database.")
 
-            # --- 2. Process and store content in ChromaDB ---
-            with open(doc_file, 'r', encoding='utf-8') as f:
-                content = f.read()
+                # --- 2. Process and store content in ChromaDB using upsert ---
+                with open(doc_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
 
-            # Simple chunking by paragraph
-            chunks = content.split('\n\n')
-            chunks = [chunk.strip() for chunk in chunks if chunk.strip()]
+                # Use advanced text splitter
+                chunks = text_splitter.split_text(content)
+                if not chunks:
+                    logger.warning(f"No content chunks found in {doc_file.name}. Skipping.")
+                    continue
 
-            if not chunks:
-                print(f"No content chunks found in {doc_file.name}. Skipping embedding.")
-                continue
+                # Generate IDs for ChromaDB. Using upsert handles existence checks.
+                ids = [f"{doc_file.name}_{i}" for i in range(len(chunks))]
+                
+                # Generate embeddings for all chunks
+                embeddings = model.encode(chunks).tolist()
 
-            # Generate IDs for ChromaDB to check for existence
-            ids = [f"{doc_file.name}_{i}" for i in range(len(chunks))]
-            
-            # Check which chunks are already in ChromaDB
-            existing_ids = collection.get(ids=ids)['ids']
-            new_chunks = [chunk for i, chunk in enumerate(chunks) if ids[i] not in existing_ids]
-            new_ids = [id for id in ids if id not in existing_ids]
+                # Use upsert to add or update chunks. This is idempotent.
+                collection.upsert(
+                    embeddings=embeddings,
+                    documents=chunks,
+                    metadatas=[{"source": doc_file.name} for _ in chunks],
+                    ids=ids
+                )
+                logger.info(f"Upserted {len(chunks)} chunks from '{doc_file.name}' to vector store.")
 
-            if not new_chunks:
-                print(f"All chunks from '{doc_file.name}' are already in the vector store. Skipping.")
-                continue
-
-            # Generate embeddings only for new chunks
-            print(f"Found {len(new_chunks)} new chunks to add.")
-            embeddings = model.encode(new_chunks).tolist()
-
-            # Add to ChromaDB
-            collection.add(
-                embeddings=embeddings,
-                documents=new_chunks,
-                metadatas=[{"source": doc_file.name} for _ in new_chunks],
-                ids=new_ids
-            )
-            print(f"Added {len(new_chunks)} chunks from '{doc_file.name}' to vector store.")
-
-    db.close()
-    print("\nData ingestion complete.")
+    finally:
+        db.close()
+        logger.info("\nData ingestion complete.")
 
 if __name__ == "__main__":
     ingest_data()

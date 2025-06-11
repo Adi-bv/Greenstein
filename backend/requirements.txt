@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+pydantic-settings
+openai
+python-dotenv
+
+# For data ingestion and RAG
+sentence-transformers
+chromadb
+pypdf

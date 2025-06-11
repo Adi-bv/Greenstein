@@ -1,67 +1,147 @@
+import logging
+import io
 import chromadb
-from pathlib import Path
+import pypdf
 from sentence_transformers import SentenceTransformer
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
+from fastapi.concurrency import run_in_threadpool
+from fastapi import Depends, Request, HTTPException
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-# Add imports for db session and models
-from ..db.session import SessionLocal
-from ..db.models import User
+from ..models.document import Document
+from ..core.config import settings
+from ..core.exceptions import RAGServiceError, LLMServiceError
+from .llm_service import LLMService, PromptStrategy, get_llm_service
+from .user_service import UserService, get_user_service
 
-# --- Constants ---
-project_root = Path(__file__).parent.parent.parent
-CHROMA_PERSIST_DIR = project_root / "chroma_db"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-COLLECTION_NAME = "community_docs"
+logger = logging.getLogger(__name__)
+
+def _extract_text_from_pdf(content: bytes) -> str:
+    """Extracts text from a PDF file's byte content."""
+    try:
+        pdf_reader = pypdf.PdfReader(io.BytesIO(content))
+        return "".join(page.extract_text() for page in pdf_reader.pages if page.extract_text())
+    except pypdf.errors.PdfReadError as e:
+        logger.error(f"Failed to read PDF: {e}")
+        raise RAGServiceError("Could not process PDF file. It may be corrupt or unsupported.")
+
+def _db_check_existing(db: Session, file_name: str) -> bool:
+    return db.query(Document).filter(Document.file_name == file_name).first() is not None
+
+def _db_add_document(db: Session, doc: Document):
+    try:
+        db.add(doc)
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise
 
 class RAGService:
-    def __init__(self):
-        self.model = SentenceTransformer(EMBEDDING_MODEL)
-        self.chroma_client = chromadb.PersistentClient(path=str(CHROMA_PERSIST_DIR))
-        self.collection = self.chroma_client.get_or_create_collection(name=COLLECTION_NAME)
+    def __init__(
+        self,
+        llm_service: LLMService,
+        user_service: UserService,
+        model: SentenceTransformer,
+        collection: chromadb.Collection,
+    ):
+        self.llm_service = llm_service
+        self.user_service = user_service
+        self.model = model
+        self.collection = collection
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000, chunk_overlap=200
+        )
 
-    def _get_or_create_user(self, db, user_id: int):
-        """Gets a user from the DB or creates one if they don't exist."""
-        user = db.query(User).filter(User.telegram_id == user_id).first()
-        if not user:
-            print(f"User with telegram_id {user_id} not found. Creating new user.")
-            new_user = User(telegram_id=user_id)
-            db.add(new_user)
-            db.commit()
-            db.refresh(new_user)
-            return new_user
-        return user
-
-    def query(self, user_query: str, user_id: int | None = None) -> str:
-        """Performs a RAG query and returns the answer."""
-        db = SessionLocal()
+    async def ingest_document(self, db: Session, file_name: str, content: bytes):
         try:
-            if user_id:
-                user = self._get_or_create_user(db, user_id)
-                print(f"Query received from user: {user.id} (Telegram ID: {user.telegram_id})")
+            if await run_in_threadpool(_db_check_existing, db, file_name):
+                logger.info(f"Document '{file_name}' already ingested. Skipping.")
+                return
 
-            print(f"Performing RAG query for: '{user_query}'")
+            text_content = ""
+            if file_name.endswith(".pdf"):
+                text_content = await run_in_threadpool(_extract_text_from_pdf, content)
+            else: # For .txt, .md
+                try:
+                    text_content = content.decode("utf-8")
+                except UnicodeDecodeError:
+                    logger.warning(f"UTF-8 decoding failed for {file_name}, trying latin-1.")
+                    text_content = content.decode("latin-1", errors="ignore")
+            
+            if not text_content.strip():
+                raise RAGServiceError(f"No text content extracted from {file_name}.")
 
-            # 1. Generate query embedding
-            query_embedding = self.model.encode(user_query).tolist()
+            chunks = self.text_splitter.split_text(text_content)
+            if not chunks:
+                raise RAGServiceError(f"No content chunks to ingest from {file_name}.")
 
-            # 2. Search ChromaDB for relevant documents
-            results = self.collection.query(
-                query_embeddings=[query_embedding],
-                n_results=2  # Retrieve the top 2 most relevant chunks
+            ids = [f"{file_name}_{i}" for i in range(len(chunks))]
+            embeddings = await run_in_threadpool(self.model.encode, chunks)
+            
+            await run_in_threadpool(
+                self.collection.upsert, embeddings=embeddings, documents=chunks, metadatas=[{"source": file_name}] * len(chunks), ids=ids
             )
 
-            retrieved_docs = results.get('documents', [[]])[0]
+            new_doc_meta = Document(source="local", file_name=file_name)
+            await run_in_threadpool(_db_add_document, db, new_doc_meta)
+            logger.info(f"Successfully ingested {len(chunks)} chunks from '{file_name}'.")
 
-            if not retrieved_docs:
-                return "I could not find any relevant information to answer your question."
+        except (RAGServiceError, LLMServiceError) as e:
+            logger.error(f"Service error during ingestion: {e}")
+            raise HTTPException(status_code=400, detail=str(e))
+        except SQLAlchemyError as e:
+            logger.error(f"Database error during ingestion: {e}", exc_info=True)
+            raise HTTPException(status_code=503, detail="A database error occurred.")
+        except Exception as e:
+            logger.error(f"Unexpected error ingesting {file_name}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="An unexpected server error occurred.")
 
-            # 3. Construct a response
-            context = "\n\n---\n\n".join(retrieved_docs)
+    async def query(self, db: Session, user_query: str, user_id: int | None = None) -> str:
+        logger.info(f"Performing RAG query for: '{user_query}'")
+        try:
+            query_embedding = await run_in_threadpool(self.model.encode, [user_query])
+
+            results = await run_in_threadpool(
+                self.collection.query, query_embeddings=query_embedding, n_results=settings.RAG_N_RESULTS
+            )
             
-            response = f"Based on the community documents, here is some relevant information:\n\n{context}"
+            documents = results.get('documents', [[]])[0]
+            if not documents:
+                return "I could not find any relevant information to answer your question."
+            document_context = "\n\n---\n\n".join(documents)
 
-            return response
-        finally:
-            db.close()
+            llm_context = {"document_context": document_context, "user_query": user_query}
+            strategy = PromptStrategy.GENERAL_QA
 
-# Singleton instance
-rag_service = RAGService()
+            if user_id:
+                user = await self.user_service.get_or_create_user(db, user_id)
+                if user:
+                    logger.info(f"Personalizing query for user_id: {user.id}")
+                    llm_context.update({
+                        "user_interests": str(user.interests),
+                        "user_interaction_summary": user.interaction_summary,
+                    })
+                    strategy = PromptStrategy.PERSONALIZE_RESPONSE
+
+            return await self.llm_service.generate_response(strategy=strategy, context=llm_context)
+
+        except (LLMServiceError, RAGServiceError) as e:
+            logger.error(f"Service error during query: {e}")
+            # Return a user-friendly message for known service errors
+            return f"I'm sorry, but I encountered an issue: {e}"
+        except Exception as e:
+            logger.error(f"Unexpected error during RAG query: {e}", exc_info=True)
+            return "I'm sorry, but an unexpected error occurred while processing your request."
+
+def get_rag_service(
+    request: Request,
+    llm_service: LLMService = Depends(get_llm_service),
+    user_service: UserService = Depends(get_user_service),
+) -> RAGService:
+    return RAGService(
+        llm_service=llm_service,
+        user_service=user_service,
+        model=request.app.state.rag_model,
+        collection=request.app.state.rag_collection,
+    )

@@ -1,22 +1,28 @@
 import httpx
 import os
 from dotenv import load_dotenv
+from typing import Any
 
 load_dotenv()
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 
-async def post_to_backend(endpoint: str, message: str, user_id: int | None = None) -> dict:
-    """Sends a message to a backend endpoint and returns the JSON response."""
+async def get_chat_response(message: str, user_id: int) -> dict[str, Any]:
+    """Gets a chat response from the backend's primary chat endpoint."""
+    url = f"{BACKEND_URL}/api/v1/chat/"
     payload = {"message": message, "user_id": user_id}
-    async with httpx.AsyncClient() as client:
-        try:
-            res = await client.post(f"{BACKEND_URL}/{endpoint}", json=payload, timeout=30.0)
-            res.raise_for_status()  # Raise an exception for bad status codes
-            return res.json()
-        except httpx.RequestError as exc:
-            print(f"An error occurred while requesting {exc.request.url!r}.")
-            return {"error": "Failed to connect to the backend."}
-        except httpx.HTTPStatusError as exc:
-            print(f"Error response {exc.response.status_code} while requesting {exc.request.url!r}.")
-            return {"error": f"Received status {exc.response.status_code} from backend."}
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, timeout=60.0) # Increased timeout for LLM
+            response.raise_for_status()
+            return response.json()
+    except httpx.RequestError as e:
+        print(f"Error connecting to backend: {e}")
+        return {"error": "Sorry, I'm having trouble connecting to my brain right now. Please try again later."}
+    except httpx.HTTPStatusError as e:
+        print(f"HTTP Status Error: {e.response.status_code} for URL {e.request.url}")
+        return {"error": "Sorry, I received an unexpected response from the backend. The team has been notified."}
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        return {"error": "An unexpected and mysterious error occurred. Please tell the admins."}
