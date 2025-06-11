@@ -1,7 +1,8 @@
 import os
 from dotenv import load_dotenv
 from typing import Final
-from telegram import Update
+import asyncio
+from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 from . import client
@@ -9,8 +10,14 @@ from . import client
 # Load environment variables
 load_dotenv()
 
-TOKEN: Final = os.getenv("TELEGRAM_TOKEN", "YOUR_DEFAULT_TOKEN")
+TOKEN: Final = os.getenv("TELEGRAM_TOKEN", "7905624830:AAEGDOfk0ppuW8_Rsn0NVMjbVXt8IJNNsaQ")
 BOT_USERNAME: Final = os.getenv("BOT_USERNAME", "greenstein_bot")
+
+def clear_webhook():
+    async def _clear():
+        bot = Bot(token=TOKEN)
+        await bot.delete_webhook(drop_pending_updates=True)
+    asyncio.run(_clear())
 
 # --- Command Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -46,6 +53,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Main Application Setup ---
 if __name__ == '__main__':
+    clear_webhook()
+
     print("Starting bot...")
     app = Application.builder().token(TOKEN).build()
 
