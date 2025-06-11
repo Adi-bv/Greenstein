@@ -17,3 +17,9 @@ async def filter_messages(data: QueryRequest):
     # Placeholder logic
     message = data.message
     return {"filtered": f"Important part of: {message}"}
+
+@app.post("/summary")
+async def summarize_messages(data: QueryRequest):
+    # Placeholder logic
+    message = data.message
+    return {"summarized": f"Summarized content is: {message}"}

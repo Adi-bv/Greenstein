@@ -13,7 +13,7 @@ BACKEND_URL = "http://127.0.0.1:8000"
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Hello! I am Greenstein Bot. How can I assist you today?')
 
-    
+
 
 # Responses
 async def handel_response(text: str) -> str:
@@ -22,11 +22,17 @@ async def handel_response(text: str) -> str:
     async with httpx.AsyncClient() as client:
       res = await client.post(f"{BACKEND_URL}/filter", json={"message": text})
       return res.json().get("filtered", "No filtered result found.")
+    
+  elif 'summary' in processed or 'summarize' in processed:
+    async with httpx.AsyncClient() as client:
+            res = await client.post(f"{BACKEND_URL}/summary", json={"message": text})
+            return res.json().get("summarized", "No summary response found.")
         
   elif 'query' in processed or 'what' in processed or 'when' in processed or 'how' in processed:
     async with httpx.AsyncClient() as client:
             res = await client.post(f"{BACKEND_URL}/query", json={"message": text})
             return res.json().get("response", "No query response found.")
+          
     
   elif 'hello' in processed or 'hi' in processed:
         return "Hello! How can I help you?"
