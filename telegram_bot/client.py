@@ -32,76 +32,38 @@ class ApiClient:
         logger.info("Closing ApiClient HTTP session.")
         await self.client.aclose()
 
-    async def get_chat_response(self, message: str, user_id: int, history: List[Dict[str, str]] = None) -> Dict[str, Any]:
-        """Gets a chat response from the backend's RAG chat endpoint, including history."""
-        url = "/api/v1/chat/"
-        payload = {"message": message, "user_id": user_id, "history": history or []}
-        logger.debug(f"Chat request payload for user {user_id}: {payload}")
-        
+    async def _handle_error(self, e: httpx.HTTPStatusError) -> Dict[str, Any]:
+        """Parses an HTTPStatusError for a detailed error message."""
+        logger.error(f"HTTP error from {e.request.url}: Status {e.response.status_code}")
         try:
-            logger.info(f"Sending chat request for user {user_id} with {len(history or [])} history entries.")
-            response = await self.client.post(url, json=payload)
-            response.raise_for_status()
-            logger.info(f"Received successful chat response for user {user_id} (Status: {response.status_code})")
-            logger.debug(f"Chat response data for user {user_id}: {response.text}")
-            return response.json()
-        except httpx.RequestError as e:
-            logger.error(f"Connection error during chat for user {user_id}: {e}")
-            return {"error": "Sorry, I'm having trouble connecting to my brain. Please try again later."}
-        except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error during chat for user {user_id}: {e.response.status_code}")
-            return {"error": "Sorry, I received an unexpected response from the backend."}
-        except Exception as e:
-            logger.exception(f"Unexpected error during chat for user {user_id}: {e}")
-            return {"error": "An unexpected and mysterious error occurred."}
+            detail = e.response.json().get("detail", "An unknown backend error occurred.")
+            # Handle Pydantic validation errors, which are often lists of dicts
+            if isinstance(detail, list):
+                error_msg = " ".join(d.get('msg', '') for d in detail)
+                detail = f"Invalid request: {error_msg}"
+            return {"error": f"Backend Error: {detail}"}
+        except Exception:
+            return {"error": f"Sorry, an unexpected error occurred (HTTP {e.response.status_code})."}
 
-    async def execute_agent_task(self, user_request: str, user_id: int) -> Dict[str, Any]:
+    async def get_chat_response(self, message: str, user_id: int) -> Dict[str, Any]:
+        """Gets a chat response from the backend's RAG chat endpoint."""
+        url = "/api/v1/chat/"
+        payload = {"message": message[:1024], "user_id": user_id}  # Truncate for safety
+        logger.info(f"Sending chat request for user {user_id} (message: '{message[:80]}...')")
+        return await self._handle_request("POST", url, json=payload)
+
+    async def execute_agent_task(self, user_request: str) -> Dict[str, Any]:
         """Executes a task using the backend's Master Agent."""
         url = "/api/v1/agent/execute"
-        payload = {"user_request": user_request}
-        logger.debug(f"Agent request payload for user {user_id}: {payload}")
-
-        try:
-            logger.info(f"Executing agent task for user {user_id}: {user_request}")
-            response = await self.client.post(url, json=payload, timeout=120.0) # Longer timeout for agent
-            response.raise_for_status()
-            logger.info(f"Agent task completed for user {user_id} (Status: {response.status_code})")
-            logger.debug(f"Agent response data for user {user_id}: {response.text}")
-            return response.json()
-        except httpx.RequestError as e:
-            logger.error(f"Connection error during agent task for user {user_id}: {e}")
-            return {"error": "Sorry, I can't connect to the agent right now."}
-        except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error during agent task for user {user_id}: {e.response.status_code}")
-            return {"error": "Sorry, the agent failed to complete the task."}
-        except Exception as e:
-            logger.exception(f"Unexpected error during agent task for user {user_id}: {e}")
-            return {"error": "An unexpected error occurred while performing the task."}
+        payload = {"user_request": user_request[:4096]}  # Truncate for safety
+        logger.info(f"Executing agent task: {user_request[:80]}...")
+        # Use a longer timeout for agent tasks, as they can be long-running.
+        return await self._handle_request("POST", url, json=payload, timeout=120.0)
 
     async def ingest_file(self, file_content: bytes, filename: str, user_id: int) -> Dict[str, Any]:
         """Ingests a file into the RAG knowledge base."""
         url = "/api/v1/ingest/"
-        files = {'file': (filename, file_content, 'application/octet-stream')}
-        logger.debug(f"Ingestion request for user {user_id}: filename='{filename}'")
-        
-        try:
-            logger.info(f"Ingesting file '{filename}' for user {user_id}")
-            # Use a separate client instance for file uploads to handle multipart/form-data correctly
-            # with a potentially longer timeout without affecting the main client.
-            # No need for a separate client. The main client can handle multipart uploads.
-            response = await self.client.post(url, files=files, timeout=180.0)
-            response.raise_for_status()
-            logger.info(f"File '{filename}' ingested successfully for user {user_id} (Status: {response.status_code})")
-            logger.debug(f"Ingestion response data for user {user_id}: {response.text}")
-            return response.json()
-        except httpx.RequestError as e:
-            logger.error(f"Connection error during file ingestion for user {user_id}: {e}")
-            return {"error": "Sorry, I couldn't upload the file. Please check the connection."}
-        except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error during file ingestion: {e.response.status_code}")
-            if e.response.status_code == 400:
-                return {"error": f"Ingestion failed: {e.response.json().get('detail', 'Unsupported file type or corrupt file')}"}
-            return {"error": "Sorry, the backend had trouble processing the file."}
-        except Exception as e:
-            logger.exception(f"Unexpected error during file ingestion for user {user_id}: {e}")
-            return {"error": "An unexpected error occurred while ingesting the file."}
+        files = {'file': (filename, file_content)}  # Let httpx set the MIME type
+        logger.info(f"Ingesting file '{filename}' for user {user_id}")
+        # Use a longer timeout for file uploads.
+        return await self._handle_request("POST", url, files=files, timeout=180.0)
