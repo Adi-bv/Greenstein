@@ -14,7 +14,9 @@ load_dotenv()
 
 # --- Constants ---
 TOKEN: Final = os.getenv("TELEGRAM_TOKEN")
-AGENT_COMMANDS: Final[List[str]] = ['summarize', 'actions', 'highlights']
+AGENT_COMMANDS: Final[List[str]] = ['report', 'tldr', 'actions']
+ADMIN_USER_ID: Final = os.getenv("ADMIN_USER_ID")
+ANNOUNCEMENT_CHAT_IDS: Final = os.getenv("ANNOUNCEMENT_CHAT_IDS")
 
 # --- Application Lifecycle Hooks ---
 async def post_init(application: Application):
@@ -25,7 +27,11 @@ async def post_init(application: Application):
 
     api_client = ApiClient()
     application.bot_data['api_client'] = api_client
-    logger.info("Bot application initialized with ApiClient.")
+    application.bot_data['admin_user_id'] = ADMIN_USER_ID
+    # Split the comma-separated string of chat IDs into a list
+    chat_ids = [chat_id.strip() for chat_id in ANNOUNCEMENT_CHAT_IDS.split(',')] if ANNOUNCEMENT_CHAT_IDS else []
+    application.bot_data['announcement_chat_ids'] = chat_ids
+    logger.info("Bot application initialized with ApiClient and configuration.")
 
 async def on_shutdown(application: Application):
     """Gracefully closes the ApiClient session on bot shutdown."""
@@ -50,9 +56,17 @@ def main():
     # --- Register Command Handlers ---
     app.add_handler(CommandHandler('start', commands.start_command))
     app.add_handler(CommandHandler('help', commands.help_command))
+    app.add_handler(CommandHandler('id', commands.id_command))
     
     # Register agent commands
     app.add_handler(CommandHandler(AGENT_COMMANDS, commands.agent_command_handler))
+
+    # --- Register Admin Commands ---
+    if ADMIN_USER_ID and app.bot_data['announcement_chat_ids']:
+        app.add_handler(CommandHandler('announcement', commands.announcement_command_handler, filters=filters.ChatType.PRIVATE))
+        logger.info(f"Announcement command registered for admin to broadcast to {len(app.bot_data['announcement_chat_ids'])} chat(s).")
+    else:
+        logger.warning("ADMIN_USER_ID or ANNOUNCEMENT_CHAT_IDS not set. Announcement command will not be available.")
 
     # --- Register Media and Message Handlers ---
     # Handler for the /upload command (must be a reply to a document)

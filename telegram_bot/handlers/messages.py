@@ -6,27 +6,33 @@ from ..client import ApiClient, logger
 from . import history
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles regular text messages, either direct or in groups."""
+    """Handles incoming text messages, responding in DMs, replies, or mentions."""
+    message = update.effective_message
+    chat = update.effective_chat
+    bot = context.bot
+
+    # Determine if the bot should respond.
+    # It should respond in private chats, or when replied to, or when mentioned in a group.
+    should_respond = False
+    if chat.type == 'private':
+        should_respond = True
+    elif message.reply_to_message and message.reply_to_message.from_user.id == bot.id:
+        should_respond = True
+    elif f"@{bot.username}" in message.text:  # Check for an explicit mention
+        should_respond = True
+
+    if not should_respond:
+        logger.debug(f"Ignoring message in chat {chat.id} as it was not a direct interaction.")
+        return
+
     api_client: ApiClient = context.application.bot_data['api_client']
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
     message_text = update.message.text
 
-    # Add user's message to history
+    # Add user's message to history for context
     history.add_message_to_history(chat_id, user_name, message_text)
-
-    # Decide if the bot should reply
-    # It replies if it's a private message or if the bot is mentioned/replied to in a group.
-    should_reply = (
-        update.message.chat.type == 'private' or
-        (context.bot.username in message_text) or
-        (update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id)
-    )
-
-    if not should_reply:
-        logger.debug(f"Ignoring message in chat {chat_id} as it doesn't warrant a reply.")
-        return
 
     logger.info(f"Handling text message from user {user_id} in chat {chat_id}")
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)

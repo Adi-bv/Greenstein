@@ -5,6 +5,7 @@ from telegram.constants import ChatAction
 from ..client import ApiClient, logger
 
 SUPPORTED_MIME_TYPES = ['application/pdf', 'text/plain', 'text/markdown']
+MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB
 
 async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the /upload command for adding files to the knowledge base."""
@@ -13,11 +14,12 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"Received /upload command from user {user_id}")
 
-    if not update.message.reply_to_message or not update.message.reply_to_message.document:
-        await update.message.reply_text("Please reply to a document with the `/upload` command to add it to the knowledge base.")
-        return
-
+    # The CommandHandler's filter ensures this is a reply to a document.
     document = update.message.reply_to_message.document
+
+    if document.file_size > MAX_FILE_SIZE_BYTES:
+        await update.message.reply_text(f"Sorry, this file is too large. The maximum allowed size is {MAX_FILE_SIZE_BYTES / 1024 / 1024:.0f} MB.")
+        return
     
     if document.mime_type not in SUPPORTED_MIME_TYPES:
         await update.message.reply_text(f"Sorry, I can only process the following file types: PDF, TXT, MD. The provided file is of type '{document.mime_type}'.")

@@ -1,4 +1,6 @@
 import re
+import telegram
+from textwrap import dedent
 from telegram import Update
 from telegram.ext import ContextTypes
 from telegram.constants import ChatAction
@@ -23,25 +25,60 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for the /help command."""
+    """Displays a help message with all available commands."""
     bot_username = context.bot.username
-    logger.info(f"Received /help command from user {update.effective_user.id}")
-    help_text = (
-        "Here's what I can do:\n\n"
-        f"💬 *Chat with me*: Mention `@{bot_username}` or reply to my messages in a group.\n\n"
-        "🧠 *Agent Commands*:\n"
-        " • `/summarize` - I'll summarize the recent conversation.\n"
-        " • `/actions` - I'll find action items in the recent conversation.\n"
-        " • `/highlights` - I'll give you the highlights of the recent conversation.\n\n"
-        "📄 *Knowledge Base*:\n"
-        " • `/upload` - Reply to a file with this command to add it to our knowledge base.\n"
-    )
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    help_text = dedent(f"""
+        *Here's what I can do for you:*
+
+        *Proactive Chat:*
+        In any group, mention `@{bot_username}` or reply to one of my messages to chat with me\.
+
+        *General Commands:*
+        `/start` - Welcome message
+        `/help` - Shows this help message
+
+        *Knowledge Management:*
+        `/upload` - Upload a document (reply to a file)
+
+        *Agent Commands (analyze chat history):*
+        `/report` - Get a detailed report of the chat
+        `/tldr` - Get a very short summary
+        `/actions` - Extract action items
+
+        *Utility Commands:*
+        `/id` - Get chat and user IDs
+
+        *Admin Commands:*
+        `/announcement <brief>` - Broadcast to groups you admin (admin only, private chat)
+    """)
+    await update.message.reply_text(escape_markdown_v2(help_text), parse_mode='MarkdownV2')
+
+async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows the current chat ID and user ID."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    if update.effective_chat.type == 'private':
+        await update.message.reply_text(f"Your User ID is: `{user_id}`")
+    else:
+        try:
+            admins = await context.bot.get_chat_administrators(chat_id)
+            admin_list = "\n".join([f"- `{admin.user.id}` ({admin.user.full_name})" for admin in admins])
+            message = (
+                f"*Chat Information*\n"
+                f"- Chat ID: `{chat_id}`\n"
+                f"- Your User ID: `{user_id}`\n\n"
+                f"*Group Admins*:\n{admin_list}"
+            )
+            await update.message.reply_text(message, parse_mode='MarkdownV2')
+        except Exception as e:
+            logger.error(f"Could not fetch admins for chat {chat_id}: {e}")
+            await update.message.reply_text(f"Chat ID: `{chat_id}`\nYour User ID: `{user_id}`")
 
 async def agent_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Generic handler for agent commands that operate on conversation history."""
     api_client: ApiClient = context.application.bot_data['api_client']
-    command = update.message.text.split(' ')[0][1:].replace('_', ' ')
+    command = update.message.text.split(' ')[0][1:] # Get command without '/'
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name
@@ -54,13 +91,22 @@ async def agent_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
     conversation_history = history.get_conversation_history(chat_id)
     if not conversation_history:
-        await update.message.reply_text("There's no conversation history yet.")
+        await update.message.reply_text("There's no conversation history for me to work with yet.")
         return
 
-    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    # Define specific prompts for each agent command
+    agent_prompts = {
+        "report": f"Analyze the following conversation and generate a detailed report. The report should summarize the key discussion points and must include any specific metrics, data, or exact information mentioned. Do not generalize or omit details.\n\n---\n{conversation_history}\n---",
+        "tldr": f"Provide a very brief, one or two-sentence summary (a TL;DR) of the following conversation:\n\n---\n{conversation_history}\n---",
+        "actions": f"Based on the following conversation, please extract action items:\n\n---\n{conversation_history}\n---"
+    }
 
-    # Frame the request for the agent
-    agent_request = f"Based on the following conversation, please {command}:\n\n---\n{conversation_history}\n---"
+    agent_request = agent_prompts.get(command)
+    if not agent_request:
+        logger.warning(f"Unknown agent command `/{command}` received from user {user_id}.")
+        return # Ignore unknown commands silently
+
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     response_data = await api_client.execute_agent_task(agent_request)
 
@@ -68,10 +114,78 @@ async def agent_command_handler(update: Update, context: ContextTypes.DEFAULT_TY
         reply = response_data["error"]
     else:
         result = response_data.get("result", f"I couldn't perform the `/{command}` action right now.")
+        # Escape the result for MarkdownV2, as it could be complex text
         reply = escape_markdown_v2(str(result))
 
-    # Add the bot's response to history
-    history.add_message_to_history(chat_id, "Greenstein", reply)
+    # Add the bot's clean response to history before escaping
+    history.add_message_to_history(chat_id, "Greenstein", result)
 
     logger.info(f"Sending reply for `/{command}` to chat {chat_id}")
     await update.message.reply_text(reply, parse_mode='MarkdownV2')
+
+
+async def announcement_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles the /announcement command for the admin.
+
+    Generates an announcement from a brief and broadcasts it to all configured
+    chats where the admin user is also an administrator.
+    """
+    admin_user_id = context.application.bot_data.get('admin_user_id')
+    announcement_chat_ids = context.application.bot_data.get('announcement_chat_ids', [])
+    user_id = update.effective_user.id
+
+    if str(user_id) != admin_user_id:
+        await update.message.reply_text("Sorry, this command is for admins only.")
+        return
+
+    if not announcement_chat_ids:
+        await update.message.reply_text("There are no announcement channels configured.")
+        return
+
+    brief = ' '.join(context.args)
+    if not brief:
+        await update.message.reply_text("Please provide a brief for the announcement.\nUsage: `/announcement <your brief here>`")
+        return
+
+    logger.info(f"Admin {user_id} initiated an announcement with brief: '{brief}'")
+    await update.message.reply_text(f"Generating announcement and checking permissions for {len(announcement_chat_ids)} group(s)...")
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+
+    api_client: ApiClient = context.application.bot_data['api_client']
+    prompt = f"Based on the following brief, draft a professional announcement. Use Telegram's MarkdownV2 syntax.\\n\\n**Brief:**\\n{brief}"
+
+    response_data = await api_client.execute_agent_task(prompt)
+
+    if "error" in response_data:
+        await update.message.reply_text(f"Sorry, I couldn't generate the announcement. Error: {response_data['error']}")
+        return
+
+    generated_announcement = response_data.get("result", "Failed to generate announcement.")
+
+    success_count, failed_chats, skipped_chats = 0, [], []
+
+    for chat_id in announcement_chat_ids:
+        try:
+            chat_admins = await context.bot.get_chat_administrators(chat_id)
+            if not any(admin.user.id == user_id for admin in chat_admins):
+                logger.warning(f"Skipping chat {chat_id}: user {user_id} is not an admin.")
+                skipped_chats.append(str(chat_id))
+                continue
+
+            await context.bot.send_message(chat_id=chat_id, text=generated_announcement, parse_mode='MarkdownV2')
+            success_count += 1
+            logger.info(f"Successfully sent announcement to chat {chat_id}.")
+        except Exception as e:
+            logger.error(f"Failed to send to chat {chat_id}: {e}")
+            failed_chats.append(str(chat_id))
+
+    report_lines = []
+    if success_count > 0:
+        report_lines.append(f"✅ Announcement sent to {success_count} group(s).")
+    if skipped_chats:
+        report_lines.append(f"Skipped {len(skipped_chats)} group(s) where you aren't an admin: `{', '.join(skipped_chats)}`")
+    if failed_chats:
+        report_lines.append(f"⚠️ Failed to send to {len(failed_chats)} group(s): `{', '.join(failed_chats)}`")
+
+    await update.message.reply_text('\n'.join(report_lines) or "Could not send to any groups.", parse_mode='MarkdownV2')

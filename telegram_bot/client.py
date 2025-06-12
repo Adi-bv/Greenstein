@@ -45,6 +45,21 @@ class ApiClient:
         except Exception:
             return {"error": f"Sorry, an unexpected error occurred (HTTP {e.response.status_code})."}
 
+    async def _handle_request(self, method: str, url: str, **kwargs) -> Dict[str, Any]:
+        """A generic helper to make requests to the backend."""
+        try:
+            response = await self.client.request(method, url, **kwargs)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            return await self._handle_error(e)
+        except httpx.RequestError as e:
+            logger.error(f"Request failed: {e}")
+            return {"error": "Could not connect to the backend service."}
+        except Exception as e:
+            logger.critical(f"An unexpected error occurred in the API client: {e}", exc_info=True)
+            return {"error": "An unexpected internal error occurred."}
+
     async def get_chat_response(self, message: str, user_id: int) -> Dict[str, Any]:
         """Gets a chat response from the backend's RAG chat endpoint."""
         url = "/api/v1/chat/"
