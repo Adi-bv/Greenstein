@@ -3,7 +3,8 @@ import sys
 from dotenv import load_dotenv
 from typing import Final, List
 
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.error import Conflict
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.ext.filters import Document
 
 from .client import ApiClient, logger
@@ -41,6 +42,18 @@ async def on_shutdown(application: Application):
         await api_client.close()
         logger.info("ApiClient session closed successfully.")
 
+# --- Error Handler ---
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log the error and send a telegram message to notify the developer."""
+    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
+
+    # Special handling for Conflict errors
+    if isinstance(context.error, Conflict):
+        logger.critical(
+            f"Conflict error detected: {context.error}. "
+            f"This is likely caused by another instance of the bot running with the same token."
+        )
+
 # --- Main Application Setup ---
 def main():
     """Sets up and runs the Telegram bot."""
@@ -74,6 +87,9 @@ def main():
 
     # Handler for general text messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages.handle_text_message))
+
+    # Register the error handler
+    app.add_error_handler(error_handler)
 
     # Start polling for updates
     logger.info("Bot is now polling for updates...")

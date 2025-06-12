@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     # Telegram Bot Settings
     TELEGRAM_TOKEN: str
     BOT_USERNAME: str
+    ADMIN_CHAT_ID: int
 
     # RAG and VectorDB Settings
     CHROMA_PERSIST_DIR: str = "./chroma_db"

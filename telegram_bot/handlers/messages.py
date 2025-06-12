@@ -3,7 +3,7 @@ from telegram.ext import ContextTypes
 from telegram.constants import ChatAction
 
 from ..client import ApiClient, logger
-from . import history
+from .. import history
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles incoming text messages, responding in DMs, replies, or mentions."""

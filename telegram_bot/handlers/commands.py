@@ -6,14 +6,14 @@ from telegram.ext import ContextTypes
 from telegram.constants import ChatAction
 
 from ..client import ApiClient, logger
-from . import history
+from .. import history
 
 
 def escape_markdown_v2(text: str) -> str:
     """Escapes characters for Telegram's MarkdownV2 parse mode."""
     # Chars to escape: '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'
     escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return re.sub(f'([\\{re.escape(escape_chars)}])', r'\\\1', text)
+    return re.sub(rf'([\{re.escape(escape_chars)}])', r'\\\1', text)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler for the /start command."""
