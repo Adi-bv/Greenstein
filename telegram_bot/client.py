@@ -1,7 +1,7 @@
 import httpx
 import os
 from dotenv import load_dotenv
-from typing import Any, Dict
+from typing import Any, Dict, List
 from loguru import logger
 
 # Load environment variables
@@ -30,13 +30,13 @@ class ApiClient:
         """Closes the HTTP client session gracefully."""
         await self.client.aclose()
 
-    async def get_chat_response(self, message: str, user_id: int) -> Dict[str, Any]:
-        """Gets a chat response from the backend's RAG chat endpoint."""
+    async def get_chat_response(self, message: str, user_id: int, history: List[Dict[str, str]] = None) -> Dict[str, Any]:
+        """Gets a chat response from the backend's RAG chat endpoint, including history."""
         url = "/api/v1/chat/"
-        payload = {"message": message, "user_id": user_id}
+        payload = {"message": message, "user_id": user_id, "history": history or []}
         
         try:
-            logger.info(f"Sending chat request for user {user_id}: {message[:80]}...")
+            logger.info(f"Sending chat request for user {user_id} with {len(history or [])} history entries.")
             response = await self.client.post(url, json=payload)
             response.raise_for_status()
             logger.info(f"Received chat response for user {user_id}")
