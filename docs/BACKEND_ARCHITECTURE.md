@@ -93,3 +93,104 @@ The most advanced feature of the backend is its ReAct-style agentic system. Here
 6.  **Finish**: The loop continues until the agent determines it has the final answer and chooses the special `finish` tool, which terminates the loop and returns the result to the user.
 
 This iterative process allows the agent to break down complex problems, gather information, and build a solution step by step, much like a human would.
+
+## 5. Design Patterns and Principles
+
+The backend is built upon several key design patterns and software engineering principles to ensure it is modular, maintainable, and scalable.
+
+-   **Service-Oriented Architecture (SOA)**: The application is divided into distinct, independent services (`RAGService`, `LLMService`, `MasterAgent`, etc.), each with a specific business responsibility. This separation of concerns simplifies development, testing, and maintenance.
+
+-   **Dependency Injection (DI)**: We leverage FastAPI's built-in support for DI using the `Depends` system. This decouples components from their dependencies, making the system more modular and easier to test. For example, services and routers receive their required dependencies (like other services or database sessions) automatically.
+
+-   **Strategy Pattern**: The `LLMService` uses the Strategy pattern to manage different ways of interacting with the language model. The `PromptStrategy` enum defines a family of algorithms (prompt templates), and the `generate_response` method uses one of these strategies at runtime to format the request to the LLM. This makes it easy to add new LLM interaction patterns without modifying the core service.
+
+-   **Registry Pattern**: The `ToolRegistry` acts as a centralized registry for all agentic tools. It automatically discovers all `BaseTool` subclasses, making them available to the `MasterAgent`. This pattern decouples the agent from the specific tool implementations, allowing new tools to be added with zero changes to the agent itself.
+
+-   **Abstract Base Class (ABC)**: The `BaseTool` class is an ABC that defines a common interface (`execute`, `name`, `description`) for all tools. This ensures that any new tool created will be compatible with the `MasterAgent` and `ToolRegistry`, enforcing a consistent structure across all agentic capabilities.
+
+## 6. Architecture Diagrams (Mermaid)
+
+Visualizing the architecture helps in understanding the relationships and flows between different components.
+
+### High-Level System Architecture
+
+This diagram shows the main containers of the Greenstein platform and how they interact.
+
+```mermaid
+graph TD
+    subgraph User Interfaces
+        A[Telegram Bot]
+        B[Web Application]
+    end
+
+    subgraph Greenstein Backend (FastAPI)
+        C[API Endpoints]
+        D[Master Agent]
+        E[RAG Service]
+        F[LLM Service]
+        subgraph Tools
+            ToolRegistry
+        end
+    end
+
+    subgraph Data Stores
+        G[SQLite DB]
+        H[ChromaDB Vector Store]
+    end
+
+    subgraph External Services
+        I[OpenAI API]
+    end
+
+    A --> C
+    B --> C
+    C --> D
+    C --> E
+    D -- uses --> F
+    D -- uses --> ToolRegistry
+    E -- uses --> F
+    E -- uses --> H
+    F -- calls --> I
+    E -- uses --> G
+    D -- uses --> G
+```
+
+### RAG Hybrid Search Pipeline
+
+This diagram illustrates the flow of a query through the `RAGService`.
+
+```mermaid
+graph LR
+    A[User Query] --> B{RAGService.query};
+    B --> C[1. Semantic Search];
+    B --> D[2. Keyword Search (BM25)];
+    C --> E{ChromaDB};
+    D --> F[In-Memory BM25 Index];
+    E --> G[Semantic Results];
+    F --> H[Keyword Results];
+    G --> I{Reciprocal Rank Fusion (RRF)};
+    H --> I;
+    I --> J[Re-ranked Context];
+    J --> K{LLMService};
+    A --> K;
+    K --> L[Generated Answer];
+```
+
+### Master Agent ReAct Loop
+
+This diagram shows the iterative reasoning process of the `MasterAgent`.
+
+```mermaid
+graph TD
+    A[User Request] --> B{MasterAgent.execute_task};
+    B --> C[Initialize Scratchpad];
+    C --> D{ReAct Loop (max_steps)};
+    D -- 1. Reason --> E[LLMService: Generate Thought + Action];
+    E --> F{Parse ReActStep};
+    F -- tool_name == 'finish' --> G[Return Final Answer];
+    F -- tool_name != 'finish' --> H[2. Act: Execute Tool];
+    H --> I[Get Observation];
+    I -- 3. Observe --> J[Update Scratchpad];
+    J --> D;
+    D -- max_steps reached --> K[Raise Error];
+```
