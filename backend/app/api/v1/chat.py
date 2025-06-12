@@ -27,6 +27,7 @@ async def handle_chat(
     rag_service: RAGService = Depends(get_rag_service),
     user_service: UserService = Depends(get_user_service),
 ):
+    print("Hii")
     """
     Handles incoming chat messages, provides a personalized response,
     and logs the interaction to build user memory.

@@ -105,7 +105,7 @@ class RAGService:
             # 1. Retrieve all documents from ChromaDB for BM25 indexing.
             # This is inefficient for very large collections but suitable for this implementation.
             # In a production system, the BM25 index might be pre-built and maintained separately.
-            all_docs_data = await run_in_threadpool(self.collection.get, include=["documents", "ids"])
+            all_docs_data = await run_in_threadpool(self.collection.get, include=["documents"])
             
             corpus_docs = all_docs_data.get('documents')
             corpus_ids = all_docs_data.get('ids')

@@ -319,6 +319,7 @@ def main():
     app = Application.builder()\
         .token(TOKEN)\
         .post_init(post_init)\
+        .post_shutdown(on_shutdown)\
         .build()
 
     # Commands
@@ -334,7 +335,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_callback_handler))
 
     # Shutdown hook
-    app.add_post_shutdown(on_shutdown)
+    # app.post_shutdown(on_shutdown)
 
     logger.info("Bot is polling...")
     app.run_polling()
