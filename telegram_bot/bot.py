@@ -36,6 +36,7 @@ class BotState:
 
 # --- Command Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Received /start command from user {update.effective_user.id} in chat {update.effective_chat.id}")
     await update.message.reply_text(
         'Hello! I am Greenstein, your AI community assistant. I can answer questions, '
         'summarize discussions, and help manage our knowledge base. '
@@ -43,6 +44,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Received /help command from user {update.effective_user.id} in chat {update.effective_chat.id}")
     help_text = (
         "Here's what I can do:\n\n"
         f"*Mention @{BOT_USERNAME}* or reply to my messages to chat with me in a group.\n\n"
@@ -55,9 +57,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def contextual_agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Received contextual agent command from user {update.effective_user.id} in chat {update.effective_chat.id}")
     """Handler for agent commands that operate on conversation history."""
     state: BotState = context.application.bot_data['state']
     command = update.message.text.split(' ')[0][1:]
+    logger.debug(f"Processing command: {command}")
     chat_id = update.effective_chat.id
     user_id = update.message.from_user.id
 
@@ -73,9 +77,11 @@ async def contextual_agent_command(update: Update, context: ContextTypes.DEFAULT
     
     response_data = await state.api_client.execute_agent_task(agent_request, user_id)
     reply = response_data.get("result") or response_data.get("error", f"I couldn't perform the `/{command}` action.")
+    logger.info(f"Sending reply for command '{command}' to chat {chat_id}")
     await update.message.reply_text(reply, parse_mode='Markdown')
 
 async def digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Received /digest command from user {update.effective_user.id}")
     state: BotState = context.application.bot_data['state']
     user_id = update.message.from_user.id
 
@@ -84,24 +90,27 @@ async def digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     agent_request = "Create a personalized digest of recent community conversations for me."
     response_data = await state.api_client.execute_agent_task(agent_request, user_id)
+    logger.debug(f"Received digest data from API for user {user_id}: {response_data}")
     
     reply = response_data.get("result") or response_data.get("error", "I couldn't generate your digest.")
-    await context.bot.send_message(chat_id=user_id, text=reply, parse_mode='Markdown')
+    logger.info(f"Sending proactive intervention message to chat {update.effective_chat.id}")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=reply, parse_mode='Markdown')
 
 # --- Message & Media Handlers ---
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Handling text message from user {update.effective_user.id} in chat {update.effective_chat.id}")
     state: BotState = context.application.bot_data['state']
     message = update.message
-    chat_id = message.chat_id
-    user_id = message.from_user.id
-    user_name = message.from_user.first_name
     text = message.text or message.caption
+    chat_id = update.effective_chat.id
+    user_id = message.from_user.id
+    logger.debug(f"Message details: chat_id={chat_id}, user_id={user_id}, text='{text[:50]}...'")
 
     # Record all messages for context, but only respond when addressed
     if chat_id not in state.chat_trackers:
         state.chat_trackers[chat_id] = ChatTracker()
     tracker = state.chat_trackers[chat_id]
-    tracker.messages.append({'user': user_name, 'text': text, 'role': 'user'})
+    tracker.messages.append({'user': message.from_user.first_name, 'text': text, 'role': 'user'})
     tracker.message_count_since_last_check += 1
 
     # Determine if the bot should respond
@@ -119,12 +128,17 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if should_respond:
         await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         history = list(tracker.messages)
-        response_data = await state.api_client.get_chat_response(text, user_id, history=history)
+        # Ensure we call the correct chat endpoint, not the agent
+        logger.info(f"Sending message from user {user_id} in chat {chat_id} to RAG pipeline")
+        response_data = await state.api_client.chat(user_id, text, conversation_history=history)
         reply = response_data.get("response") or response_data.get("error", "I seem to have lost my train of thought.")
         bot_reply = await update.message.reply_text(reply)
-        tracker.messages.append({'user': BOT_USERNAME, 'text': bot_reply.text, 'role': 'assistant'})
+        # Add the bot's response to the history for true multi-turn chat
+        if 'error' not in response_data:
+            tracker.messages.append({'user': BOT_USERNAME, 'text': bot_reply.text, 'role': 'assistant'})
 
 async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Received /upload command from user {update.effective_user.id} in chat {update.effective_chat.id}")
     """Handles the /upload command, requiring a file caption."""
     state: BotState = context.application.bot_data['state']
     message = update.message
@@ -139,18 +153,28 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=message.chat_id, action=ChatAction.UPLOADING_DOCUMENT)
 
     try:
-        file = await media_obj.get_file()
-        file_content = await file.download_as_bytearray()
+        file_id = media_obj.file_id
+        file = await context.bot.get_file(file_id)
+        
         filename = getattr(media_obj, 'file_name', f"{file.file_id}.jpg")
+        mime_type = getattr(media_obj, 'mime_type', 'image/jpeg')
+        file_size = getattr(media_obj, 'file_size', 0)
+
+        logger.info(f"Processing file upload: name={filename}, type={mime_type}, size={file_size} bytes")
+
+        file_bytes = await file.download_as_bytearray()
 
         # Check for supported file types for documents
-        if message.document and message.document.mime_type not in SUPPORTED_FILE_TYPES:
-            await message.reply_text(f"Sorry, I can only process PDF, TXT, or Markdown files. Your file is a `{message.document.mime_type}`.")
+        if message.document and mime_type not in SUPPORTED_FILE_TYPES:
+            await message.reply_text(f"Sorry, I can only process PDF, TXT, or Markdown files. Your file is a `{mime_type}`.")
             return
 
-        response_data = await state.api_client.ingest_file(bytes(file_content), filename, user_id)
+        # Ensure we call the correct file ingestion endpoint
+        logger.info(f"Sending file '{filename}' to ingestion API for user {user_id}")
+        response_data = await state.api_client.ingest_file(file_bytes, filename, user_id)
         reply = response_data.get("message") or response_data.get("error", "File ingestion failed.")
 
+        logger.info(f"Sending ingestion response to chat {message.chat_id}")
         await message.reply_text(reply)
     except Exception as e:
         logger.exception(f"Error during media upload for user {user_id}: {e}")
@@ -158,7 +182,8 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await query.answer() # Acknowledge the button press
+    logger.info(f"Received button callback from user {query.from_user.id} with data: {query.data}")
 
     action, *params = query.data.split(':')
     
@@ -171,6 +196,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
 # --- Proactive & Admin Logic (largely unchanged) ---
 async def check_proactive_intervention(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Checking for proactive intervention in chat {update.effective_chat.id}")
     state: BotState = context.application.bot_data['state']
     chat_id = update.effective_chat.id
     user_id = update.message.from_user.id
@@ -198,6 +224,8 @@ async def check_proactive_intervention(update: Update, context: ContextTypes.DEF
         suggestion = result.get('proactive_suggestion')
         kb_draft = result.get('kb_article_draft')
 
+        if kb_draft:
+            logger.debug(f"KB draft created with confidence: {kb_draft.get('confidence_score', 0)}")
         if kb_draft and kb_draft.get('confidence_score', 0) >= KB_DRAFT_CONFIDENCE_THRESHOLD:
             await send_draft_for_approval(kb_draft, context)
         
@@ -214,6 +242,7 @@ async def check_proactive_intervention(update: Update, context: ContextTypes.DEF
         logger.debug(f"Raw agent response: {response_data.get('result')}")
 
 async def send_draft_for_approval(kb_draft: Dict[str, Any], context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Sending knowledge base draft for approval to admin chat {ADMIN_CHAT_ID}")
     if not ADMIN_CHAT_ID:
         logger.warning("ADMIN_CHAT_ID is not set. Cannot send KB draft for approval.")
         return
@@ -236,6 +265,7 @@ async def send_draft_for_approval(kb_draft: Dict[str, Any], context: ContextType
     logger.info(f"Sent KB draft {draft_id} for admin approval.")
 
 async def handle_user_proactive_action(query: Update.callback_query, context: ContextTypes.DEFAULT_TYPE, action: str):
+    logger.info(f"Handling user proactive action '{action}' from user {query.from_user.id}")
     chat_id = query.message.chat_id
     user_id = query.from_user.id
     state: BotState = context.application.bot_data['state']
@@ -267,6 +297,7 @@ async def handle_user_proactive_action(query: Update.callback_query, context: Co
         await query.edit_message_text(text="An error occurred while processing your request.")
 
 async def handle_admin_kb_action(query: Update.callback_query, context: ContextTypes.DEFAULT_TYPE, action: str, params: list):
+    logger.info(f"Handling admin KB action '{action}' from user {query.from_user.id}")
     state: BotState = context.application.bot_data['state']
     user_id = query.from_user.id
     draft_id = params[0]
