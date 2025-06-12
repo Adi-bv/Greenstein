@@ -1,5 +1,5 @@
 import logging
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from typing import Dict, Any
 from fastapi import Depends
 
@@ -42,9 +42,10 @@ class MasterAgent:
 
         for i in range(self.max_steps):
             logger.info(f"ReAct Step {i+1}/{self.max_steps}")
+            observation = ""
 
-            # 1. Reason: LLM generates a thought and an action plan (a ReActStep)
             try:
+                # 1. Reason: LLM generates a thought and an action plan (a ReActStep)
                 react_step = await self.llm_service.generate_response(
                     strategy=PromptStrategy.REACT_AGENT_STEP,
                     context={
@@ -54,36 +55,39 @@ class MasterAgent:
                     },
                     response_model=ReActStep
                 )
-            except LLMServiceError as e:
-                logger.error(f"ReAct agent reasoning failed: {e}")
-                raise AgentError("I got stuck trying to figure out the next step. Please try rephrasing.") from e
 
-            thought = react_step.thought
-            action = react_step.tool_name
-            args = react_step.args
+                thought = react_step.thought
+                action = react_step.tool_name
+                args = react_step.args
 
-            scratchpad += f"\nThought: {thought}\nAction: {action} with args {args}"
-            logger.debug(f"Scratchpad updated:\n{scratchpad}")
+                scratchpad += f"\nThought: {thought}\nAction: {action} with args {args}"
+                logger.debug(f"Scratchpad updated with new thought/action.")
 
-            # 2. Act: Execute the planned action
-            if action == "finish":
-                answer = args.get("answer", "I have completed the task.")
-                logger.info(f"ReAct agent finished with answer: {answer}")
-                return answer
+                # 2. Act: Execute the planned action
+                if action == "finish":
+                    answer = args.get("answer", "I have completed the task.")
+                    logger.info(f"ReAct agent finished with answer: {answer}")
+                    return answer
 
-            tool = self.tool_registry.get_tool(action)
-            if not tool:
-                observation = f"Error: Tool '{action}' not found."
-            else:
-                try:
-                    tool_result = await tool.execute(**args)
-                    observation = f"Observation: {tool_result}"
-                except Exception as e:
-                    logger.error(f"Execution of tool '{action}' failed: {e}", exc_info=True)
-                    observation = f"Error executing tool '{action}': {e}"
+                tool = self.tool_registry.get_tool(action)
+                if not tool:
+                    observation = f"Error: Tool '{action}' not found."
+                else:
+                    try:
+                        tool_result = await tool.execute(**args)
+                        observation = f"Observation: {tool_result}"
+                    except Exception as e:
+                        logger.error(f"Execution of tool '{action}' failed: {e}", exc_info=True)
+                        observation = f"Error executing tool '{action}': {e}"
+
+            except (LLMServiceError, ValidationError) as e:
+                logger.error(f"Error in ReAct step {i+1}: {e}", exc_info=True)
+                # This is a critical observation for the agent to self-correct
+                observation = f"Error: My previous attempt failed with the error: '{e}'. I must carefully analyze the error and my previous steps to form a new, valid plan. I need to ensure my output is a valid JSON object conforming to the required schema."
             
             # 3. Observe: Add the result back to the scratchpad
             scratchpad += f"\n{observation}"
+            logger.debug(f"Scratchpad updated with new observation.")
 
         logger.warning(f"ReAct agent reached max steps ({self.max_steps}) without finishing.")
         raise AgentError("I could not complete the task within the allowed number of steps.")

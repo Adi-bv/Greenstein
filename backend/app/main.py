@@ -41,7 +41,7 @@ app = FastAPI(title="Greenstein AI Backend", lifespan=lifespan)
 
 # Include API routers with standardized tags
 app.include_router(chat_v1.router, prefix="/api/v1/chat", tags=["v1", "Chat"])
-app.include_router(agents_v1.router, prefix="/api/v1/agents", tags=["v1", "Agents"])
+app.include_router(agents_v1.router, prefix="/api/v1/agent", tags=["v1", "Agents"])
 app.include_router(ingest.router, prefix="/api/v1/ingest", tags=["v1", "Ingestion"])
 
 @app.get("/health", tags=["Monitoring"])
