@@ -85,3 +85,4 @@ coverage/
 *.swo
 
 *.bin
+chroma_db/
