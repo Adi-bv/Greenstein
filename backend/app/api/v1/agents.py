@@ -21,6 +21,9 @@ class SummarizationResponse(BaseModel):
 class ActionExtractionResponse(BaseModel):
     action_items: List[str]
 
+class CategorizationResponse(BaseModel):
+    category: str
+
 # --- Summarization Agent ---
 @router.post("/summarize", response_model=SummarizationResponse, tags=["Agents"])
 async def summarize_text(request: TextRequest, llm_service: LLMService = Depends(get_llm_service)):
@@ -80,4 +83,39 @@ async def extract_action_items(request: TextRequest, llm_service: LLMService = D
         raise HTTPException(status_code=502, detail=str(e))
     except Exception as e:
         logger.error(f"Unexpected error during action extraction: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="An internal server error occurred.")
+
+# --- Message Categorization Agent ---
+@router.post("/categorize", response_model=CategorizationResponse, tags=["Agents"])
+async def categorize_text(request: TextRequest, llm_service: LLMService = Depends(get_llm_service)):
+    """
+    Accepts a block of text and returns its category.
+    This endpoint uses a specialized prompt for classification.
+    """
+    if not request.text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty.")
+
+    try:
+        context = {"text_to_categorize": request.text}
+        json_response = await llm_service.generate_response(
+            strategy=PromptStrategy.CATEGORIZE_MESSAGE,
+            context=context,
+            json_mode=True
+        )
+        
+        data = json.loads(json_response)
+        category = data.get("category")
+        
+        if not category or not isinstance(category, str):
+            raise LLMServiceError("LLM returned malformed JSON for categorization.")
+            
+        return CategorizationResponse(category=category)
+    except json.JSONDecodeError:
+        logger.error(f"Failed to decode JSON from LLM response for categorization: {json_response}")
+        raise HTTPException(status_code=502, detail="Failed to parse category from AI response.")
+    except LLMServiceError as e:
+        logger.error(f"LLM service error during categorization: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error during categorization: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="An internal server error occurred.")

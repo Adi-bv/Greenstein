@@ -23,6 +23,18 @@ def _db_create_user(db: Session, telegram_id: int) -> User:
         db.rollback()
         raise
 
+def _db_append_interaction_summary(db: Session, user: User, new_interaction: str) -> User:
+    current_summary = user.interaction_summary or ""
+    new_summary = f"{current_summary}\n- {new_interaction}".strip()
+    user.interaction_summary = new_summary
+    try:
+        db.commit()
+        db.refresh(user)
+        return user
+    except SQLAlchemyError:
+        db.rollback()
+        raise
+
 def _db_update_user(db: Session, user: User, profile_data: Dict[str, Any]) -> User:
     for key, value in profile_data.items():
         if key in ALLOWED_UPDATE_FIELDS:
@@ -59,6 +71,15 @@ class UserService:
         user = await self.get_user_by_telegram_id(db, telegram_id)
         if user:
             return await run_in_threadpool(_db_update_user, db, user, profile_data)
+        return None
+
+    async def update_interaction_summary(self, db: Session, telegram_id: int, new_interaction: str) -> User | None:
+        """
+        Appends a new interaction to the user's summary. This is key for building memory.
+        """
+        user = await self.get_user_by_telegram_id(db, telegram_id)
+        if user:
+            return await run_in_threadpool(_db_append_interaction_summary, db, user, new_interaction)
         return None
 
 @lru_cache()
