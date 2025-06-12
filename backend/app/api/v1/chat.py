@@ -1,5 +1,5 @@
 import logging
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -7,6 +7,7 @@ from ...services.rag_service import RAGService, get_rag_service
 from ...services.user_service import UserService, get_user_service
 from ...db.session import get_db
 from ...core.exceptions import LLMServiceError
+from ...core.security import sanitize_input
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ class ChatResponse(BaseModel):
 @router.post("/", response_model=ChatResponse)
 async def handle_chat(
     request: ChatRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     rag_service: RAGService = Depends(get_rag_service),
     user_service: UserService = Depends(get_user_service),
@@ -32,11 +34,15 @@ async def handle_chat(
     if not request.message:
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
+    sanitized_message = sanitize_input(request.message)
+    if not sanitized_message:
+        raise HTTPException(status_code=400, detail="Sanitized message is empty.")
+
     try:
         # The RAG service will automatically use user context if telegram_id is provided
         answer = await rag_service.query(
             db=db,
-            user_query=request.message,
+            user_query=sanitized_message,
             user_id=request.telegram_id,  # Pass telegram_id to RAG service
         )
 
@@ -44,8 +50,8 @@ async def handle_chat(
         if request.telegram_id:
             interaction_to_log = f"User: {request.message}\nAI: {answer}"
             # This runs in the background and doesn't block the response
-            await user_service.update_interaction_summary(
-                db, request.telegram_id, interaction_to_log
+            background_tasks.add_task(
+                user_service.update_interaction_summary, db, request.telegram_id, interaction_to_log
             )
 
         return ChatResponse(response=answer)

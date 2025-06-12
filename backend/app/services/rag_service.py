@@ -8,6 +8,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from fastapi.concurrency import run_in_threadpool
 from fastapi import Depends, Request, HTTPException
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from rank_bm25 import BM25Okapi
+from typing import List
 
 from ..models.document import Document
 from ..core.config import settings
@@ -98,19 +100,66 @@ class RAGService:
             raise HTTPException(status_code=500, detail="An unexpected server error occurred.")
 
     async def query(self, db: Session, user_query: str, user_id: int | None = None) -> str:
-        logger.info(f"Performing RAG query for: '{user_query}'")
+        logger.info(f"Performing HYBRID RAG query for: '{user_query}'")
         try:
-            query_embedding = await run_in_threadpool(self.model.encode, [user_query])
+            # 1. Retrieve all documents from ChromaDB for BM25 indexing.
+            # This is inefficient for very large collections but suitable for this implementation.
+            # In a production system, the BM25 index might be pre-built and maintained separately.
+            all_docs_data = await run_in_threadpool(self.collection.get, include=["documents", "ids"])
+            
+            corpus_docs = all_docs_data.get('documents')
+            corpus_ids = all_docs_data.get('ids')
 
-            results = await run_in_threadpool(
+            if not corpus_docs:
+                return "I could not find any information to answer your question as the knowledge base is empty."
+
+            # 2. Perform Keyword Search (BM25)
+            tokenized_corpus = [doc.lower().split() for doc in corpus_docs]
+            bm25 = BM25Okapi(tokenized_corpus)
+            tokenized_query = user_query.lower().split()
+            
+            bm25_scores = bm25.get_scores(tokenized_query)
+            
+            # Get top N results indices from BM25
+            top_n_bm25_indices = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:settings.RAG_N_RESULTS]
+            bm25_ids = [corpus_ids[i] for i in top_n_bm25_indices]
+            logger.debug(f"BM25 top IDs: {bm25_ids}")
+
+            # 3. Perform Semantic Search (Vector Search)
+            query_embedding = await run_in_threadpool(self.model.encode, [user_query])
+            semantic_results = await run_in_threadpool(
                 self.collection.query, query_embeddings=query_embedding, n_results=settings.RAG_N_RESULTS
             )
+            semantic_ids = semantic_results.get('ids', [[]])[0]
+            logger.debug(f"Semantic top IDs: {semantic_ids}")
             
-            documents = results.get('documents', [[]])[0]
-            if not documents:
-                return "I could not find any relevant information to answer your question."
-            document_context = "\n\n---\n\n".join(documents)
+            # 4. Re-rank results using Reciprocal Rank Fusion (RRF)
+            # RRF is a simple and effective method to combine ranked lists.
+            k = 60  # RRF constant, common default
+            rrf_scores = {}
+            
+            for rank, doc_id in enumerate(semantic_ids):
+                rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + 1 / (k + rank + 1)
+            
+            for rank, doc_id in enumerate(bm25_ids):
+                rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + 1 / (k + rank + 1)
+                
+            sorted_fused_ids = sorted(rrf_scores.keys(), key=lambda id: rrf_scores[id], reverse=True)
+            
+            # Get top N results from the fused list
+            final_doc_ids = sorted_fused_ids[:settings.RAG_N_RESULTS]
+            logger.info(f"Final re-ranked doc IDs: {final_doc_ids}")
 
+            # 5. Retrieve document content for the final IDs
+            id_to_doc_map = dict(zip(corpus_ids, corpus_docs))
+            final_documents = [id_to_doc_map[doc_id] for doc_id in final_doc_ids if doc_id in id_to_doc_map]
+            
+            if not final_documents:
+                return "I could not find any relevant information to answer your question."
+            
+            document_context = "\n\n---\n\n".join(final_documents)
+
+            # 6. Generate response with LLM (same as before)
             llm_context = {"document_context": document_context, "user_query": user_query}
             strategy = PromptStrategy.GENERAL_QA
 
@@ -128,7 +177,6 @@ class RAGService:
 
         except (LLMServiceError, RAGServiceError) as e:
             logger.error(f"Service error during query: {e}")
-            # Return a user-friendly message for known service errors
             return f"I'm sorry, but I encountered an issue: {e}"
         except Exception as e:
             logger.error(f"Unexpected error during RAG query: {e}", exc_info=True)

@@ -1,104 +1,125 @@
 import logging
+import instructor
 from openai import AsyncOpenAI, OpenAIError
+from pydantic import BaseModel
 from ..core.config import settings
 from enum import Enum
-from typing import Dict
+from typing import Dict, Type, Union
 from functools import lru_cache
 
-from .trust_service import sanitize_input
 from ..core.exceptions import LLMServiceError
 
 logger = logging.getLogger(__name__)
 
-class PromptStrategy(Enum):
+class PromptStrategy(str, Enum):
     GENERAL_QA = "general_qa"
     SUMMARIZE = "summarize"
     EXTRACT_ACTIONS_JSON = "extract_actions_json"
     PERSONALIZE_RESPONSE = "personalize_response"
     CATEGORIZE_MESSAGE = "categorize_message"
+    SUMMARIZE_INTERACTION_HISTORY = "summarize_interaction_history"
+    MASTER_AGENT_PLANNER = "master_agent_planner"
+    REACT_AGENT_STEP = "react_agent_step"
 
 PROMPT_TEMPLATES = {
     PromptStrategy.GENERAL_QA: {
         "system": (
-            "You are a highly precise and factual assistant for a community platform. "
-            "Your primary directive is to answer user questions *exclusively* based on the provided context documents. "
-            "Do not use any external knowledge. If the answer is not found in the context, "
-            "you *must* state that you do not have enough information to answer and should not attempt to guess."
+            "You are a helpful AI assistant for the Greenstein community. "
+            "Answer the user's question based on the provided context. "
+            "Be concise and professional."
         ),
-        "user": (
-            "Context:\n---\n{document_context}\n---\n\n"
-            "Based *only* on the context above, answer the following question:\n\n"
-            "Question: {user_query}\n\n"
-            "Answer:"
-        ),
+        "user": "Context:\n---\n{document_context}\n---\n\nQuestion: {user_query}",
     },
     PromptStrategy.SUMMARIZE: {
         "system": (
-            "You are a highly skilled text summarization engine. Your goal is to produce a neutral, "
-            "objective, and concise summary of the given text, capturing only the main points and key "
-            "information present. The summary should be a single, coherent paragraph."
+            "You are an expert in summarizing text. Provide a concise, "
+            "neutral summary of the following content."
         ),
-        "user": "Please summarize the following text:\n\n{text_to_summarize}",
+        "user": "{text_to_summarize}",
     },
     PromptStrategy.EXTRACT_ACTIONS_JSON: {
         "system": (
-            "You are a specialized AI agent designed to extract actionable tasks from text. "
-            "Your output must be a single, valid JSON object. This object should have one key, `action_items`, "
-            "which holds a list of strings. Each string must be a clear action starting with a verb. "
-            "Do not include any text, explanations, or markdown formatting outside of the JSON object."
+            "You are an expert in identifying action items. Analyze the text and "
+            "extract a list of clear, actionable tasks. Your output must be a JSON "
+            "object with a single key 'action_items' containing a list of strings."
         ),
         "user": "Please extract action items from this text:\n\n{text_to_analyze}",
     },
     PromptStrategy.PERSONALIZE_RESPONSE: {
         "system": (
-            "You are a friendly and perceptive AI assistant. Your goal is to provide personalized answers "
-            "based on the user's profile while adhering strictly to the provided context for factual information. "
-            "Use the user's interests to frame the answer in a way that is relevant to them, but do *not* invent facts. "
-            "If the answer is not in the context, state that clearly."
+            "You are a helpful AI assistant for the Greenstein community. "
+            "Answer the user's question based on the provided context. "
+            "Personalize your response using the user's interests and past interactions. "
+            "Be friendly, concise, and professional."
         ),
         "user": (
+            "Context:\n---\n{document_context}\n---\n\n"
             "User Profile:\n- Interests: {user_interests}\n- Past Interactions Summary: {user_interaction_summary}\n\n"
-            "Context Documents:\n---\n{document_context}\n---\n\n"
-            "Based *only* on the context documents, but tailoring the tone for the user profile above, "
-            "answer the following question:\n\n"
-            "Question: {user_query}\n\n"
-            "Personalized Answer:"
+            "Question: {user_query}"
         ),
     },
     PromptStrategy.CATEGORIZE_MESSAGE: {
         "system": (
-            "You are a message classification agent. Your task is to categorize the user's message into one of the "
-            "following predefined categories: `Question`, `Announcement`, `Feedback`, `Bug Report`, or `General Chit-Chat`. "
-            "Respond ONLY with a single JSON object containing one key, `category`, with the chosen category as its value."
+            "You are an expert in message classification. Categorize the following text "
+            "into one of the predefined categories. Your output must be a JSON object "
+            "with a single key 'category' and a value from the allowed list."
         ),
-        "user": "Please categorize the following message:\n\n{text_to_categorize}",
+        "user": "Please categorize this text:\n\n{text_to_categorize}",
+    },
+    PromptStrategy.SUMMARIZE_INTERACTION_HISTORY: {
+        "system": (
+            "You are an expert in summarizing conversations. Condense the following "
+            "interaction history into a concise, third-person narrative summary. "
+            "Focus on the key topics discussed and decisions made."
+        ),
+        "user": "Please summarize the following interaction history:\n\n{interaction_history}",
+    },
+    PromptStrategy.MASTER_AGENT_PLANNER: {
+        "system": (
+            "You are a master agent that orchestrates tasks by selecting the appropriate tool. "
+            "Based on the user's request and the list of available tools, you must decide which tool to use. "
+            "Your output must conform to the provided JSON schema, specifying the tool's name and the arguments to pass to it. "
+            "The 'reasoning' field should briefly explain your choice. The 'args' field must be a dictionary of arguments for the chosen tool."
+        ),
+        "user": (
+            "Available Tools:\n---\n{tool_descriptions}\n---\n\nUser Request: {user_request}"
+        ),
+    },
+    PromptStrategy.REACT_AGENT_STEP: {
+        "system": (
+            "You are a reasoning agent that solves user requests by breaking them down into steps. "
+            "You have access to a set of tools and must follow the ReAct (Reason, Act, Observe) framework. "
+            "At each step, you must provide a 'thought' explaining your reasoning, then choose a 'tool_name' and specify the 'args' for it. "
+            "The 'thought' should be a concise reflection on what to do next. "
+            "When you have the final answer, you MUST use the 'finish' tool."
+        ),
+        "user": (
+            "Available Tools:\n---\n{tool_descriptions}\n---\n\nUser Objective: {user_request}\n\n" 
+            "# Previous Steps (Thought, Action, Observation):\n{scratchpad}"
+        ),
     },
 }
 
 class LLMService:
     def __init__(self, api_key: str, timeout: int):
-        self.client = AsyncOpenAI(api_key=api_key, timeout=timeout)
+        # Patch the client to add instructor's features
+        self.client = instructor.patch(AsyncOpenAI(api_key=api_key, timeout=timeout))
 
     async def generate_response(
         self,
         strategy: PromptStrategy,
         context: Dict[str, str],
         model: str | None = None,
-        json_mode: bool = False,
-    ) -> str:
+        response_model: Type[BaseModel] = None,
+    ) -> Union[str, BaseModel]:
         model = model or settings.LLM_MODEL
         template = PROMPT_TEMPLATES.get(strategy)
         if not template:
             raise LLMServiceError("Invalid prompt strategy selected.")
 
-        sanitized_context = {
-            k: sanitize_input(v) if isinstance(v, str) else v
-            for k, v in context.items()
-        }
-
         try:
             system_prompt = template["system"]
-            user_prompt = template["user"].format(**sanitized_context)
+            user_prompt = template["user"].format(**context)
         except KeyError as e:
             msg = f"Missing key '{e.args[0]}' in context for strategy '{strategy.name}'"
             logger.error(msg)
@@ -112,11 +133,16 @@ class LLMService:
                     {"role": "user", "content": user_prompt},
                 ],
             }
-            if json_mode:
-                response_kwargs["response_format"] = {"type": "json_object"}
+            if response_model:
+                response_kwargs["response_model"] = response_model
 
             response = await self.client.chat.completions.create(**response_kwargs)
-            return response.choices[0].message.content.strip()
+
+            if response_model:
+                return response
+            else:
+                return response.choices[0].message.content.strip()
+
         except OpenAIError as e:
             logger.error(f"OpenAI API error: {e}")
             raise LLMServiceError(f"An error occurred with the AI service: {e}")

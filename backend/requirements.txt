@@ -10,3 +10,5 @@ python-dotenv
 sentence-transformers
 chromadb
 pypdf
+instructor
+rank_bm25

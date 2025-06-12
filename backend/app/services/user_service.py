@@ -1,13 +1,18 @@
+import logging
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from typing import Dict, Any
 from functools import lru_cache
 from fastapi.concurrency import run_in_threadpool
+from fastapi import Depends
 
 from ..models.user import User
+from .llm_service import LLMService, get_llm_service, PromptStrategy
 
 # Define fields that are allowed to be updated to prevent mass assignment vulnerabilities
 ALLOWED_UPDATE_FIELDS = ["interests", "interaction_summary"]
+
+logger = logging.getLogger(__name__)
 
 def _db_get_user(db: Session, telegram_id: int) -> User | None:
     return db.query(User).filter(User.telegram_id == telegram_id).first()
@@ -48,6 +53,11 @@ def _db_update_user(db: Session, user: User, profile_data: Dict[str, Any]) -> Us
         raise
 
 class UserService:
+    # Define a threshold for when to summarize the interaction history (in characters)
+    MAX_SUMMARY_LENGTH = 2000
+
+    def __init__(self, llm_service: LLMService):
+        self.llm_service = llm_service
     async def get_user_by_telegram_id(self, db: Session, telegram_id: int) -> User | None:
         """Asynchronously retrieve a user by their Telegram ID."""
         return await run_in_threadpool(_db_get_user, db, telegram_id)
@@ -75,13 +85,41 @@ class UserService:
 
     async def update_interaction_summary(self, db: Session, telegram_id: int, new_interaction: str) -> User | None:
         """
-        Appends a new interaction to the user's summary. This is key for building memory.
+        Appends a new interaction and, if the summary is too long, triggers a background summarization.
         """
-        user = await self.get_user_by_telegram_id(db, telegram_id)
-        if user:
-            return await run_in_threadpool(_db_append_interaction_summary, db, user, new_interaction)
-        return None
+        user = await self.get_or_create_user(db, telegram_id)
+        if not user:
+            return None
+
+        # First, append the latest interaction to ensure it's saved immediately
+        user = await run_in_threadpool(_db_append_interaction_summary, db, user, new_interaction)
+
+        # Check if the summary now needs to be condensed
+        if len(user.interaction_summary) > self.MAX_SUMMARY_LENGTH:
+            logger.info(
+                f"Interaction summary for user {telegram_id} exceeds "
+                f"{self.MAX_SUMMARY_LENGTH} chars. Triggering summarization."
+            )
+            try:
+                # Generate the new summary using the LLM service
+                new_summary = await self.llm_service.generate_response(
+                    strategy=PromptStrategy.SUMMARIZE_INTERACTION_HISTORY,
+                    context={"interaction_history": user.interaction_summary},
+                )
+
+                # Replace the old summary with the new condensed version
+                summary_prefix = "--- CONVERSATION SUMMARY ---"
+                profile_data = {"interaction_summary": f"{summary_prefix}\n{new_summary}"}
+                user = await run_in_threadpool(_db_update_user, db, user, profile_data)
+                logger.info(f"Successfully summarized and updated history for user {telegram_id}.")
+
+            except Exception as e:
+                # If summarization fails, log the error but don't crash the background task.
+                # The full summary is still preserved in the DB for the next attempt.
+                logger.error(f"Failed to summarize interaction history for user {telegram_id}: {e}", exc_info=True)
+
+        return user
 
 @lru_cache()
-def get_user_service() -> UserService:
-    return UserService()
+def get_user_service(llm_service: LLMService = Depends(get_llm_service)) -> UserService:
+    return UserService(llm_service=llm_service)
