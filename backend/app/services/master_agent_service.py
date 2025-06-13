@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class ReActStep(BaseModel):
     thought: str = Field(..., description="The agent's reasoning and plan for the next action.")
     tool_name: str = Field(..., description="The name of the tool to execute, or 'finish' to complete the task.")
-    args: Dict[str, Any] = Field(..., description="The arguments for the chosen tool. For 'finish', this should be {'answer': '...'}.")
+    args: Dict[str, Any] = Field(default_factory=dict, description="The arguments for the chosen tool. For 'finish', this should be {'answer': '...'}.")
 
 class MasterAgent:
     """The master agent, now powered by a ReAct loop for multi-step reasoning."""
@@ -89,8 +89,20 @@ class MasterAgent:
             scratchpad += f"\n{observation}"
             logger.debug(f"Scratchpad updated with new observation.")
 
-        logger.warning(f"ReAct agent reached max steps ({self.max_steps}) without finishing.")
-        raise AgentError("I could not complete the task within the allowed number of steps.")
+        logger.warning(f"ReAct agent reached max steps ({self.max_steps}). Attempting to generate a final answer.")
+        try:
+            final_answer = await self.llm_service.generate_response(
+                strategy=PromptStrategy.REACT_AGENT_FINAL_ANSWER,
+                context={
+                    "user_request": user_request,
+                    "scratchpad": scratchpad
+                }
+            )
+            logger.info(f"Generated a final answer after max steps: {final_answer}")
+            return final_answer
+        except LLMServiceError as e:
+            logger.error(f"Failed to generate a final answer after max steps: {e}", exc_info=True)
+            raise AgentError("I could not complete the task within the allowed number of steps and also failed to generate a summary of my work.")
 
 # Dependency injector for the MasterAgent
 def get_master_agent(

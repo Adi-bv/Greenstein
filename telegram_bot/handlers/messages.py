@@ -4,6 +4,7 @@ from telegram.constants import ChatAction
 
 from ..client import ApiClient, logger
 from .. import history
+from .commands import escape_markdown_v2
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles incoming text messages, responding in DMs, replies, or mentions."""
@@ -46,4 +47,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     history.add_message_to_history(chat_id, "Greenstein", reply)
 
     logger.info(f"Sending chat response to user {user_id} in chat {chat_id}")
-    await update.message.reply_text(reply)
+    # The reply is dynamic content from the API and must be escaped.
+    await update.message.reply_text(escape_markdown_v2(reply), parse_mode='MarkdownV2')
+
+    await update.message.reply_text(escape_markdown_v2(reply), parse_mode='MarkdownV2')

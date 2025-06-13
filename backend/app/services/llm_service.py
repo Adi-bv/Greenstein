@@ -20,6 +20,7 @@ class PromptStrategy(str, Enum):
     SUMMARIZE_INTERACTION_HISTORY = "summarize_interaction_history"
     MASTER_AGENT_PLANNER = "master_agent_planner"
     REACT_AGENT_STEP = "react_agent_step"
+    REACT_AGENT_FINAL_ANSWER = "react_agent_final_answer"
 
 PROMPT_TEMPLATES = {
     PromptStrategy.GENERAL_QA: {
@@ -94,7 +95,8 @@ PROMPT_TEMPLATES = {
             "\n\n**RULES:**\n"
             "1. **thought**: A string explaining your reasoning for the current step.\n"
             "2. **tool_name**: The name of the tool to use, or 'finish' to end the task.\n"
-            "3. **args**: A dictionary of arguments for the tool. **This field is MANDATORY.** If a tool needs no arguments, provide an empty dictionary: `{}`.\n"
+            "3. **args**: A dictionary of arguments for the tool. If a tool needs no arguments, provide an empty dictionary: `{}`.\n"
+            "4. **Input Handling**: If a tool's description indicates it requires a block of text as input (e.g., an argument named 'text'), you MUST use the content provided in the 'User Objective' for that argument. Do not make up text.\n"
             "\n**EXAMPLE:**\n"
             "If the user asks to summarize a report, and you have a 'summarize_text' tool that takes a 'text' argument, your response should look like this:\n"
             "```json\n"
@@ -120,6 +122,20 @@ PROMPT_TEMPLATES = {
         "user": (
             "Available Tools:\n---\n{tool_descriptions}\n---\n\nUser Objective: {user_request}\n\n" 
             "# Previous Steps (Thought, Action, Observation):\n{scratchpad}"
+        ),
+    },
+    PromptStrategy.REACT_AGENT_FINAL_ANSWER: {
+        "system": (
+            "You are a reasoning agent that has attempted to solve a user's request but has reached the maximum number of steps. "
+            "Your task is to provide a final, best-effort answer based on the work you have done so far. "
+            "Analyze the user's objective and the history of your thoughts, actions, and observations in the scratchpad. "
+            "Synthesize this information into a coherent and helpful response. "
+            "If you have a clear result, state it. If you were stuck, explain the difficulty and provide a partial answer if possible."
+        ),
+        "user": (
+            "User Objective: {user_request}\n\n"
+            "Your Work History (Scratchpad):\n---\n{scratchpad}\n---\n\n"
+            "Based on your work, what is the final answer?"
         ),
     },
 }
@@ -149,6 +165,13 @@ class LLMService:
             logger.error(msg)
             raise LLMServiceError(msg)
 
+        logger.debug("--- LLM Request ---")
+        logger.debug(f"Strategy: {strategy.name}")
+        logger.debug(f"System Prompt: {system_prompt}")
+        logger.debug(f"User Prompt: {user_prompt}")
+        if response_model:
+            logger.debug(f"Response Model: {response_model.__name__}")
+
         try:
             response_kwargs = {
                 "model": model,
@@ -161,6 +184,12 @@ class LLMService:
                 response_kwargs["response_model"] = response_model
 
             response = await self.client.chat.completions.create(**response_kwargs)
+
+            logger.debug("--- LLM Response ---")
+            if response_model:
+                logger.debug(f"Raw Response (pydantic model): {response.model_dump_json(indent=2)}")
+            else:
+                logger.debug(f"Raw Response (text): {response.choices[0].message.content.strip()}")
 
             if response_model:
                 return response

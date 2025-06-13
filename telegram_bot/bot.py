@@ -59,6 +59,8 @@ def main():
     """Sets up and runs the Telegram bot."""
     logger.info("Starting bot...")
 
+    print(TOKEN)
+
     # Create the Telegram Application
     app = Application.builder()\
         .token(TOKEN)\
